@@ -1,9 +1,22 @@
 from flask import Flask, request, jsonify, redirect, render_template
 from flasgger import Swagger
+from flask_sqlalchemy import SQLAlchemy
 import datetime
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 swagger = Swagger(app)
+
+# Database Configuration
+# REPLACE 'root', 'password', 'localhost', 'bank_db' with your actual MySQL credentials
+# If running in Docker and MySQL is on host, use 'host.docker.internal' instead of 'localhost'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
 
 @app.route('/')
 def index():
@@ -26,12 +39,15 @@ def swagger_ui_redirect():
     return redirect('/apidocs')
 
 # --- Models ---
-class Customer:
-    def __init__(self, customer_id, name, email, phone_number):
-        self.customer_id = customer_id
-        self.name = name
-        self.email = email
-        self.phone_number = phone_number
+class Customer(db.Model):
+    __tablename__ = 'customers'
+    customer_id = db.Column(db.String(50), primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(100), nullable=False)
+    phone_number = db.Column(db.String(20), nullable=False)
+    
+    # Relationship to accounts
+    accounts = db.relationship('Account', backref='customer', lazy=True)
 
     def to_dict(self):
         return {
@@ -41,12 +57,15 @@ class Customer:
             "phone_number": self.phone_number
         }
 
-class Account:
-    def __init__(self, account_number, customer_id, account_type, balance=0.0):
-        self.account_number = account_number
-        self.customer_id = customer_id
-        self.account_type = account_type
-        self.balance = balance
+class Account(db.Model):
+    __tablename__ = 'accounts'
+    account_number = db.Column(db.String(50), primary_key=True)
+    customer_id = db.Column(db.String(50), db.ForeignKey('customers.customer_id'), nullable=False)
+    account_type = db.Column(db.String(20), nullable=False)
+    balance = db.Column(db.Float, default=0.0)
+    
+    # Relationship to transactions
+    transactions = db.relationship('Transaction', backref='account', lazy=True)
 
     def deposit(self, amount):
         if amount > 0:
@@ -68,13 +87,13 @@ class Account:
             "balance": self.balance
         }
 
-class Transaction:
-    def __init__(self, transaction_id, account_number, transaction_type, amount, date=None):
-        self.transaction_id = transaction_id
-        self.account_number = account_number
-        self.transaction_type = transaction_type
-        self.amount = amount
-        self.date = date if date else datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+class Transaction(db.Model):
+    __tablename__ = 'transactions'
+    transaction_id = db.Column(db.String(50), primary_key=True)
+    account_number = db.Column(db.String(50), db.ForeignKey('accounts.account_number'), nullable=False)
+    transaction_type = db.Column(db.String(20), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    date = db.Column(db.String(50), default=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def to_dict(self):
         return {
@@ -84,11 +103,6 @@ class Transaction:
             "amount": self.amount,
             "date": self.date
         }
-
-# --- In-memory Storage ---
-customers = []
-accounts = []
-transactions = []
 
 # --- Routes ---
 
@@ -121,11 +135,17 @@ def create_customer():
     data = request.get_json()
     c_id = data.get('customer_id')
     
-    if any(c.customer_id == c_id for c in customers):
+    if Customer.query.get(c_id):
         return jsonify({"error": "Customer ID already exists!"}), 400
         
-    customer = Customer(c_id, data.get('name'), data.get('email'), data.get('phone_number'))
-    customers.append(customer)
+    customer = Customer(
+        customer_id=c_id, 
+        name=data.get('name'), 
+        email=data.get('email'), 
+        phone_number=data.get('phone_number')
+    )
+    db.session.add(customer)
+    db.session.commit()
     return jsonify({"message": "Customer created successfully!", "customer": customer.to_dict()}), 201
 
 @app.route('/customers', methods=['GET'])
@@ -137,6 +157,7 @@ def get_customers():
       200:
         description: List of customers
     """
+    customers = Customer.query.all()
     return jsonify([c.to_dict() for c in customers])
 
 @app.route('/accounts', methods=['POST'])
@@ -170,13 +191,19 @@ def create_account():
     a_num = data.get('account_number')
     c_id = data.get('customer_id')
     
-    if not any(c.customer_id == c_id for c in customers):
+    if not Customer.query.get(c_id):
         return jsonify({"error": "Customer ID not found!"}), 400
-    if any(a.account_number == a_num for a in accounts):
+    if Account.query.get(a_num):
         return jsonify({"error": "Account Number already exists!"}), 400
         
-    account = Account(a_num, c_id, data.get('account_type'), data.get('balance', 0.0))
-    accounts.append(account)
+    account = Account(
+        account_number=a_num, 
+        customer_id=c_id, 
+        account_type=data.get('account_type'), 
+        balance=data.get('balance', 0.0)
+    )
+    db.session.add(account)
+    db.session.commit()
     return jsonify({"message": "Account created successfully!", "account": account.to_dict()}), 201
 
 @app.route('/accounts', methods=['GET'])
@@ -188,6 +215,7 @@ def get_accounts():
       200:
         description: List of accounts
     """
+    accounts = Account.query.all()
     return jsonify([a.to_dict() for a in accounts])
 
 @app.route('/transactions', methods=['POST'])
@@ -223,7 +251,7 @@ def perform_transaction():
     t_type = data.get('transaction_type')
     amount = data.get('amount')
     
-    account = next((a for a in accounts if a.account_number == a_num), None)
+    account = Account.query.get(a_num)
     if not account:
         return jsonify({"error": "Account not found!"}), 400
         
@@ -236,8 +264,18 @@ def perform_transaction():
         return jsonify({"error": "Invalid transaction type"}), 400
         
     if success:
-        transaction = Transaction(t_id, a_num, t_type, amount)
-        transactions.append(transaction)
+        if Transaction.query.get(t_id):
+             return jsonify({"error": "Transaction ID already exists"}), 400
+
+        transaction = Transaction(
+            transaction_id=t_id, 
+            account_number=a_num, 
+            transaction_type=t_type, 
+            amount=amount
+        )
+        db.session.add(transaction)
+        db.session.commit() # Commits both the balance change and the new transaction
+        
         return jsonify({
             "message": "Transaction successful",
             "new_balance": account.balance,
@@ -255,7 +293,10 @@ def get_transactions():
       200:
         description: List of transactions
     """
+    transactions = Transaction.query.all()
     return jsonify([t.to_dict() for t in transactions])
 
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)

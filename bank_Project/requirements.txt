@@ -1,2 +1,6 @@
 flask
 flasgger
+flask-sqlalchemy
+pymysql
+python-dotenv
+cryptography
