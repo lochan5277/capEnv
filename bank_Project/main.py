@@ -13,7 +13,7 @@ swagger = Swagger(app)
 # Database Configuration
 # REPLACE 'root', 'password', 'localhost', 'bank_db' with your actual MySQL credentials
 # If running in Docker and MySQL is on host, use 'host.docker.internal' instead of 'localhost'
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
